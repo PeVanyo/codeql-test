@@ -1,0 +1,166 @@
+name: export-codeql
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - shell: pwsh
+      env: 
+        githubtoken: ${{ secrets.GITHUB_TOKEN }}
+      id: find_needed_scans
+      run: |
+        $token=$env:githubtoken
+        $gitHubApiUri = "https://api.github.com/repos"
+        $repoName="${{ github.repository }}"
+        $reportName="codescanreport.html"
+
+        
+        $header = @{Authorization=("Bearer {0}" -f $token)};
+        $header.Add("Accept", "application/vnd.github+json")
+        $header.Add("X-GitHub-Api-Version", "2022-11-28")
+
+        #this Block will Go through each pages of Github restapi untill the last pages to get the code scanning alerts
+        $pageexists=$true
+        $page=1
+        $alerts=[System.Collections.ArrayList]::new()
+        while ($pageexists -eq $true) {
+            $Uri = $gitHubApiUri + '/' + $repoName + '/code-scanning/alerts?per_page=100&state=open&page=' + $page
+            Write-Host 'Getting Codescan alerts of Repo using url '+$Uri
+            $pagedalerts = Invoke-RestMethod -Method Get -Uri $Uri -Headers $header
+            $alerts += $pagedalerts
+            if ($pagedalerts.Count -eq 0){
+                $pageexists=$false
+                Write-Host "Total Count of Alerts Got From Github api"
+                Write-Host $alerts.Count
+                break;
+            }
+            else{
+                Write-Host "Scanned Page No $page"
+                Write-Host "Alerts Got in $page page and total alert Count"
+                Write-Host $pagedalerts.Count
+                Write-Host $alerts.Count
+                $page += 1
+            }
+        }
+
+        #Check if There is Data.If there is Creating the Html report other wise throws "No Code scanning Report found"
+        if($alerts.Count -eq 0){
+            Write-Host "No Code Scanning Alerts Found ...."
+        }
+        else{  
+            $AlertsList = $alerts
+
+            #Sorting happens here.🤷‍♂️ solves sorting  
+            $criticalalertlist=[System.Collections.ArrayList]::new()
+            $highalertlist=[System.Collections.ArrayList]::new()
+            $mediumalertlist=[System.Collections.ArrayList]::new()
+            $lowalertlist=[System.Collections.ArrayList]::new()
+            $warningalertlist=[System.Collections.ArrayList]::new()
+            $notealertlist=[System.Collections.ArrayList]::new()
+            $erroralertlist=[System.Collections.ArrayList]::new()
+            foreach($alert in $AlertsList){
+                if($alert.rule.security_severity_level -eq 'high'){
+                    $highalertlist += $alert
+                }
+                elseif($alert.rule.security_severity_level -eq 'critical'){
+                    $criticalalertlist += $alert
+                }
+                elseif($alert.rule.security_severity_level -eq 'medium'){
+                    $mediumalertlist += $alert
+                }
+                elseif($alert.rule.security_severity_level -eq 'low'){
+                    $lowalertlist += $alert
+                }
+                elseif($alert.rule.security_severity_level -eq 'warning'){
+                    $warningalertlist += $alert
+                }
+                elseif($alert.rule.security_severity_level -eq 'note'){
+                    $notealertlist += $alert
+                }
+                else{
+                    $erroralertlist += $alert
+                }
+            }
+            $AlertsList = $critical + $highalertlist + $mediumalertlist + $lowalertlist + $warningalertlist + $notealertlist + $erroralertlist
+
+            
+            $Sevlist = $AlertsList.rule.security_severity_level | Group-Object -AsHashTable -AsString
+            $SevTypes = $Sevlist | Select-Object -ExpandProperty Keys
+        
+            $report = '<!DOCTYPE html><html><head>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style> 
+                table {
+                    border-collapse: collapse;
+                    border-spacing: 0;
+                    width: 100%;
+                    border: 1px solid black;
+                    table-layout: fixed
+                  }
+                  th { 
+                    padding-top: 2px;
+                    padding-bottom: 2px;
+                    text-align: left;
+                    background-color: #FFC300;
+                    color: black;
+                    }
+                  th, td {
+                    text-align: left;
+                    padding: 8px;
+                    border: 1px solid black;
+                  }
+                  .number{
+                    text-align: left;
+                    margin-left: auto;
+                    margin-right: auto;
+                    font-size: 1.5em;
+                    th { 
+                        padding-top: 2px;
+                        padding-bottom: 2px;
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        text-align: left;
+                        background-color: #FFC300;
+                        color: black;
+                        }
+                }    
+                tr:hover {background-color: #ddd;}
+                tr:nth-child(even){background-color: #f2f2f2}
+                </style>
+                </head><body>'
+            
+                $report = $report + '<center><h2 style="width:max-content">' + $repoName + '</h2></center>'
+                $report = $report + '<h3><center>  CodeQL Alert Details ' + '</center></h4>'
+                $report = $report + '<h5><center style="color:gray"> Genrated at ' + ([DateTime]::UtcNow.ToString('u').Replace('Z','UTC')) + '</center></h4>'
+                $report | Out-File -Force $reportName
+                $report = '';
+                $report = $report + "<table class='number' style='width:max-content'><tr><th>Severity</th><th>Count</th></tr>`n"
+        
+                foreach($Sevtype in $SevTypes){
+                    $report = $report + '<tr><td>' + $Sevtype + '</td><td>' + $Sevlist.Get_Item($Sevtype).Count + "</td></tr>`n"
+                }
+                $report = $report + '</table><br><br>'
+                $report += '';
+                $report = $report + "<div style='overflow-x:scroll;'><table><tr><th>Alert id</th><th>State</th><th>Severity</th><th>Tool</th><th style='width:30%'>File Path</th><th style='width:40%'>Desc.</th></tr>"
+        
+                foreach($alert in $AlertsList){
+                    $report = $report + '<tr><td><a target="_blank" href="' + $alert.html_url + '" >' +  $alert.number + '</a></td><td>' + $alert.state + '</td><td>' + $alert.rule.security_severity_level +'</td><td>' + $alert.tool.name + '</td><td style="width:2%;word-wrap: break-word;">' + $alert.most_recent_instance.location.path + '</td><td>' + $alert.most_recent_instance.message.text + "</td></tr>`n" 
+                }
+        
+                $report = $report + '</table></div><br><br>'
+                $report | Out-File -Append -Force $reportName
+                $report = '';
+        }
+
+    - uses: actions/upload-artifact@v4
+      with:
+            name: Codeql-Report
+            path: codescanreport.html
